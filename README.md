@@ -411,19 +411,30 @@ If instead the handshake never starts at all, your server IP is blocked outright
 
 ### Enabling it
 
-Interactive install offers it automatically when you choose UDP. For the CLI:
+**It is enabled by default on UDP installs**, since it is the reason this fork exists. The interactive installer
+asks and pre-selects it; pressing enter accepts it. To get stock upstream behaviour, choose "No" or pass
+`--antidpi none`.
 
 ```bash
-./openvpn-install.sh install --antidpi errorfree
+./openvpn-install.sh install                    # errorfree, the default on UDP
+./openvpn-install.sh install --antidpi strong   # stronger masking
+./openvpn-install.sh install --antidpi none     # stock OpenVPN, no patch
 ```
 
 | Mode | Masking | Client-visible effect |
 | --- | --- | --- |
-| `none` (default) | — | standard OpenVPN |
+| `errorfree` (default on UDP) | good | no client-side warnings; best for phones and routers |
 | `strong` | best | clients log 150 harmless `unknown opcode` warnings per handshake |
-| `errorfree` | slightly weaker | no client-side warnings; better for phones and routers |
+| `none` (default on TCP) | — | standard OpenVPN |
 
-Prefer `errorfree` unless you have a reason not to: the decoys it sends carry a valid opcode, so strict clients such as OpenVPN Connect discard them silently instead of logging an error for each one.
+`errorfree` is the default because the decoys it sends carry a valid opcode, so strict clients such as OpenVPN
+Connect discard them silently instead of logging an error for each one. Choose `strong` only if `errorfree`
+turns out not to be enough on your network.
+
+> [!IMPORTANT]
+> Enabling this compiles OpenVPN from source, which takes a few minutes and installs build dependencies.
+> If the build fails the install aborts loudly rather than quietly leaving you unpatched — check
+> `ANTIDPI=` in `/etc/openvpn/server/openvpn-install.conf` if you are ever unsure what a server is running.
 
 ### How it works
 

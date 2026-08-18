@@ -223,7 +223,7 @@ show_install_help() {
 			--port-random         Use random port (49152-65535)
 			--protocol <proto>    Protocol: udp or tcp (default: udp)
 			--antidpi <mode>      Anti-DPI handshake obfuscation, UDP only:
-			                      none (default), strong, errorfree
+			                      errorfree (default), strong, none
 			--mtu <size>          Tunnel MTU (default: 1500)
 
 		DNS Options:
@@ -469,7 +469,7 @@ parse_curve() {
 readonly PROTOCOLS=("udp" "tcp")
 
 # Anti-DPI handshake obfuscation modes
-readonly ANTIDPI_MODES=("none" "strong" "errorfree")
+readonly ANTIDPI_MODES=("errorfree" "strong" "none")
 readonly ANTIDPI_PREFIX_STRONG="/opt/ovpn-patched"
 readonly ANTIDPI_PREFIX_ERRORFREE="/opt/ovpn-patched-ef"
 
@@ -528,8 +528,13 @@ set_installation_defaults() {
 	PORT="${PORT:-1194}"
 	PROTOCOL="${PROTOCOL:-udp}"
 
-	# Anti-DPI handshake obfuscation (UDP only)
-	ANTIDPI="${ANTIDPI:-none}"
+	# Anti-DPI handshake obfuscation (UDP only). This fork exists for it, so it is
+	# on by default; pass --antidpi none for stock upstream behaviour.
+	if [[ $PROTOCOL =~ ^udp ]]; then
+		ANTIDPI="${ANTIDPI:-errorfree}"
+	else
+		ANTIDPI="${ANTIDPI:-none}"
+	fi
 
 	# DNS (use string name)
 	DNS="${DNS:-cloudflare}"
@@ -944,7 +949,9 @@ validate_configuration() {
 	esac
 
 	# Validate ANTIDPI (unset when the interactive prompt was skipped for TCP)
-	ANTIDPI="${ANTIDPI:-none}"
+	if [[ -z $ANTIDPI ]]; then
+		if [[ $PROTOCOL =~ ^udp ]]; then ANTIDPI="errorfree"; else ANTIDPI="none"; fi
+	fi
 	case "$ANTIDPI" in
 	none | strong | errorfree) ;;
 	*) log_fatal "Invalid anti-DPI mode: $ANTIDPI. Must be 'none', 'strong' or 'errorfree'." ;;
@@ -2760,14 +2767,12 @@ function installQuestions() {
 	esac
 	if [[ $PROTOCOL =~ ^udp ]]; then
 		log_menu ""
-		log_prompt "Do you want to enable anti-DPI handshake obfuscation?"
-		log_prompt "Some networks (notably Russia and Iran) fingerprint the OpenVPN handshake and"
-		log_prompt "silently blackhole the tunnel seconds after it connects. This rebuilds OpenVPN"
-		log_prompt "so the server buries every handshake in decoy packets, which breaks that match."
-		log_prompt "It is server-side only: existing .ovpn files and stock clients keep working."
-		log_prompt "Costs a few minutes of compiling. Data packets are untouched, so speed is unaffected."
-		local antidpi_labels=("No, standard OpenVPN" "Strong (best masking; clients log harmless 'unknown opcode' warnings)" "Error-Free (no client-side warnings; recommended for phones and routers)")
-		select_with_labels "Anti-DPI" antidpi_labels ANTIDPI_MODES "none" ANTIDPI
+		log_prompt "Enable anti-DPI handshake obfuscation? (the reason this fork exists)"
+		log_prompt "Needed where DPI fingerprints and blocks the OpenVPN protocol itself, e.g. Russia and Iran."
+		log_prompt "Server-side only: your .ovpn files and stock clients keep working unchanged."
+		log_prompt "Requires compiling OpenVPN (a few minutes). Speed and latency are unaffected."
+		local antidpi_labels=("Yes, Error-Free (recommended: no client-side warnings)" "Yes, Strong (best masking; clients log harmless 'unknown opcode' warnings)" "No, standard OpenVPN")
+		select_with_labels "Anti-DPI" antidpi_labels ANTIDPI_MODES "errorfree" ANTIDPI
 	fi
 	if [[ $ROUTE_INTERNET == "y" ]]; then
 		log_menu ""
