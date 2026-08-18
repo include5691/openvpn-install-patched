@@ -4,7 +4,8 @@
 # SC2034: Variables used indirectly or exported for subprocesses
 
 # Secure OpenVPN server installer for Debian, Ubuntu, CentOS, Amazon Linux 2023, Fedora, Oracle Linux, Arch Linux, Rocky Linux and AlmaLinux.
-# https://github.com/angristan/openvpn-install
+# https://github.com/include5691/openvpn-install-patched
+# Fork of https://github.com/angristan/openvpn-install adding anti-DPI handshake obfuscation.
 
 # Configuration constants
 readonly DEFAULT_CERT_VALIDITY_DURATION_DAYS=3650 # 10 years
@@ -221,6 +222,8 @@ show_install_help() {
 			--port <num>          OpenVPN port (default: 1194)
 			--port-random         Use random port (49152-65535)
 			--protocol <proto>    Protocol: udp or tcp (default: udp)
+			--antidpi <mode>      Anti-DPI handshake obfuscation, UDP only:
+			                      none (default), strong, errorfree
 			--mtu <size>          Tunnel MTU (default: 1500)
 
 		DNS Options:
@@ -261,6 +264,7 @@ show_install_help() {
 		Examples:
 			$SCRIPT_NAME install
 			$SCRIPT_NAME install --port 443 --protocol tcp
+			$SCRIPT_NAME install --antidpi errorfree
 			$SCRIPT_NAME install --dns quad9 --cipher AES-256-GCM
 			$SCRIPT_NAME install -i
 	EOF
@@ -464,6 +468,11 @@ parse_curve() {
 # Protocol options
 readonly PROTOCOLS=("udp" "tcp")
 
+# Anti-DPI handshake obfuscation modes
+readonly ANTIDPI_MODES=("none" "strong" "errorfree")
+readonly ANTIDPI_PREFIX_STRONG="/opt/ovpn-patched"
+readonly ANTIDPI_PREFIX_ERRORFREE="/opt/ovpn-patched-ef"
+
 # DNS providers (use string names)
 readonly DNS_PROVIDERS=("system" "unbound" "cloudflare" "quad9" "quad9-uncensored" "fdn" "dnswatch" "opendns" "google" "yandex" "adguard" "nextdns" "custom")
 
@@ -518,6 +527,9 @@ set_installation_defaults() {
 	LOCAL_NETWORKS="${LOCAL_NETWORKS:-}"
 	PORT="${PORT:-1194}"
 	PROTOCOL="${PROTOCOL:-udp}"
+
+	# Anti-DPI handshake obfuscation (UDP only)
+	ANTIDPI="${ANTIDPI:-none}"
 
 	# DNS (use string name)
 	DNS="${DNS:-cloudflare}"
@@ -931,6 +943,16 @@ validate_configuration() {
 	*) log_fatal "Invalid protocol: $PROTOCOL. Must be 'udp' or 'tcp'." ;;
 	esac
 
+	# Validate ANTIDPI (unset when the interactive prompt was skipped for TCP)
+	ANTIDPI="${ANTIDPI:-none}"
+	case "$ANTIDPI" in
+	none | strong | errorfree) ;;
+	*) log_fatal "Invalid anti-DPI mode: $ANTIDPI. Must be 'none', 'strong' or 'errorfree'." ;;
+	esac
+	if [[ $ANTIDPI != "none" && ! $PROTOCOL =~ ^udp ]]; then
+		log_fatal "The anti-DPI patch only affects the UDP send path. Use --protocol udp, or --antidpi none."
+	fi
+
 	# Validate DNS. Split-tunnel installs do not push a DNS server.
 	case "$DNS" in
 	system | unbound | cloudflare | quad9 | quad9-uncensored | fdn | dnswatch | opendns | google | yandex | adguard | nextdns | custom) ;;
@@ -1304,6 +1326,16 @@ cmd_install() {
 				PROTOCOL="$2"
 				;;
 			*) log_fatal "Invalid protocol: $2. Use 'udp' or 'tcp'." ;;
+			esac
+			shift 2
+			;;
+		--antidpi)
+			[[ -z "${2:-}" ]] && log_fatal "--antidpi requires an argument"
+			case "$2" in
+			none | strong | errorfree)
+				ANTIDPI="$2"
+				;;
+			*) log_fatal "Invalid anti-DPI mode: $2. Use 'none', 'strong' or 'errorfree'." ;;
 			esac
 			shift 2
 			;;
@@ -2444,7 +2476,7 @@ function prepare_network_config() {
 
 function installQuestions() {
 	log_header "OpenVPN Installer"
-	log_prompt "The git repository is available at: https://github.com/angristan/openvpn-install"
+	log_prompt "The git repository is available at: https://github.com/include5691/openvpn-install-patched"
 
 	log_prompt "I need to ask you a few questions before starting the setup."
 	log_prompt "You can leave the default options and just press enter if you are okay with them."
@@ -2726,6 +2758,17 @@ function installQuestions() {
 		PROTOCOL="tcp"
 		;;
 	esac
+	if [[ $PROTOCOL =~ ^udp ]]; then
+		log_menu ""
+		log_prompt "Do you want to enable anti-DPI handshake obfuscation?"
+		log_prompt "Some networks (notably Russia and Iran) fingerprint the OpenVPN handshake and"
+		log_prompt "silently blackhole the tunnel seconds after it connects. This rebuilds OpenVPN"
+		log_prompt "so the server buries every handshake in decoy packets, which breaks that match."
+		log_prompt "It is server-side only: existing .ovpn files and stock clients keep working."
+		log_prompt "Costs a few minutes of compiling. Data packets are untouched, so speed is unaffected."
+		local antidpi_labels=("No, standard OpenVPN" "Strong (best masking; clients log harmless 'unknown opcode' warnings)" "Error-Free (no client-side warnings; recommended for phones and routers)")
+		select_with_labels "Anti-DPI" antidpi_labels ANTIDPI_MODES "none" ANTIDPI
+	fi
 	if [[ $ROUTE_INTERNET == "y" ]]; then
 		log_menu ""
 		log_prompt "What DNS resolvers do you want to use with the VPN?"
@@ -2817,7 +2860,7 @@ function installQuestions() {
 	log_prompt "Do you want to customize encryption settings?"
 	log_prompt "Unless you know what you're doing, you should stick with the default parameters provided by the script."
 	log_prompt "Note that whatever you choose, all the choices presented in the script are safe (unlike OpenVPN's defaults)."
-	log_prompt "See https://github.com/angristan/openvpn-install#security-and-encryption to learn more."
+	log_prompt "See https://github.com/include5691/openvpn-install-patched#security-and-encryption to learn more."
 	log_menu ""
 	until [[ $CUSTOMIZE_ENC =~ (y|n) ]]; do
 		read -rp "Customize encryption settings? [y/n]: " -e -i n CUSTOMIZE_ENC
@@ -2998,6 +3041,170 @@ function installQuestions() {
 	fi
 }
 
+function antidpiPrefix() {
+	case "$1" in
+	strong) echo "$ANTIDPI_PREFIX_STRONG" ;;
+	errorfree) echo "$ANTIDPI_PREFIX_ERRORFREE" ;;
+	*) echo "" ;;
+	esac
+}
+
+function installAntiDPIBuildDeps() {
+	if [[ $OS =~ (debian|ubuntu) ]]; then
+		run_cmd_fatal "Installing build dependencies" apt-get install -y build-essential pkg-config libssl-dev libsystemd-dev libnl-genl-3-dev libcap-ng-dev
+	elif [[ $OS =~ (centos|oracle|amzn2023|fedora) ]]; then
+		local pm="dnf"
+		[[ $OS =~ (centos|oracle) ]] && pm="yum"
+		run_cmd_fatal "Installing build dependencies" $pm install -y gcc make pkgconfig openssl-devel systemd-devel libnl3-devel libcap-ng-devel
+	elif [[ $OS == 'arch' ]]; then
+		run_cmd_fatal "Installing build dependencies" pacman --needed --noconfirm -Syu base-devel openssl libnl libcap-ng
+	else
+		log_fatal "Anti-DPI patch has no build recipe for this distribution ($OS)"
+	fi
+}
+
+# Ensure there is swap before compiling: gcc OOMs on 1GB VPSes, and an OOM kill
+# during install can take the running tunnel with it.
+function ensureSwapForBuild() {
+	if swapon --show 2>/dev/null | grep -q .; then
+		return
+	fi
+	local mem_mb
+	mem_mb=$(awk '/MemTotal/ {print int($2 / 1024)}' /proc/meminfo)
+	if ((mem_mb >= 1536)); then
+		return
+	fi
+	log_info "Only ${mem_mb}MB RAM detected, adding 2GB swap for the build..."
+	if fallocate -l 2G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none; then
+		chmod 600 /swapfile
+		mkswap /swapfile >/dev/null 2>&1
+		swapon /swapfile 2>/dev/null && log_success "Swap enabled"
+	fi
+}
+
+function buildAntiDPIOpenVPN() {
+	local mode="$1"
+	local prefix patch_mode version src
+	prefix=$(antidpiPrefix "$mode")
+
+	if [[ $mode == "errorfree" ]]; then
+		patch_mode='		_Bool error_free = 1;'
+	else
+		patch_mode='		_Bool error_free = 0;'
+	fi
+
+	log_header "Building anti-DPI OpenVPN ($mode)"
+
+	ensureSwapForBuild
+	installAntiDPIBuildDeps
+
+	version=$(openvpn --version 2>/dev/null | head -n1 | awk '{print $2}')
+	[[ -n $version ]] || log_fatal "Could not determine the installed OpenVPN version"
+	log_info "Patching OpenVPN $version source to match the installed binary"
+
+	src=/usr/local/src/openvpn
+	rm -rf "$src"
+	mkdir -p "$src"
+	if ! curl -fL --connect-timeout 30 "https://build.openvpn.net/downloads/releases/openvpn-$version.tar.gz" -o /tmp/openvpn-src.tar.gz 2>/dev/null &&
+		! curl -fL --connect-timeout 30 "https://github.com/OpenVPN/openvpn/releases/download/v$version/openvpn-$version.tar.gz" -o /tmp/openvpn-src.tar.gz 2>/dev/null; then
+		log_fatal "Could not download OpenVPN $version source"
+	fi
+	run_cmd_fatal "Extracting source" tar --strip-components=1 -xzf /tmp/openvpn-src.tar.gz -C "$src"
+	rm -f /tmp/openvpn-src.tar.gz
+
+	grep -q "link_socket_write_udp(struct link_socket \*sock" "$src/src/openvpn/socket.h" ||
+		log_fatal "OpenVPN $version does not expose the expected link_socket_write_udp() signature; the anti-DPI patch needs updating"
+
+	sed -i '/link_socket_write_udp(struct link_socket \*sock/,/^$/c\
+link_socket_write_udp(struct link_socket *sock,\
+					struct buffer *buf,\
+					struct link_socket_actual *to)\
+{\
+	int opcode = *BPTR(buf) >> 3;\
+	if (opcode == 7 || opcode == 8 || opcode == 10)\
+	{\
+'"$patch_mode"'\
+		ssize_t buffer_sent = 0;\
+		if (error_free) {\
+#ifdef _WIN32\
+			buffer_sent = link_socket_write_win32(sock, buf, to);\
+#else\
+			buffer_sent = link_socket_write_udp_posix(sock, buf, to);\
+#endif\
+			if (buffer_sent < 0)\
+				return buffer_sent;\
+		}\
+		int buffer_len = BLEN(buf);\
+		for (int i = 0; i < 3; i++) {\
+			int data_len = (int)(random() % 81 + buffer_len);\
+			uint8_t data[data_len];\
+			if (error_free) {\
+				memcpy(data, BPTR(buf), buffer_len);\
+				data[0] = (uint8_t)40;\
+				for (int k = buffer_len; k < data_len; k++) {\
+					data[k] = (uint8_t)(random() % 256);\
+				}\
+			} else {\
+				uint8_t first_byte;\
+				do {\
+					first_byte = (uint8_t)(random() % 256);\
+				} while ((first_byte >> 3) >= 1 && (first_byte >> 3) <= 11);\
+				data[0] = first_byte;\
+				for (int k = 1; k < data_len; k++) {\
+					data[k] = (uint8_t)(random() % 256);\
+				}\
+			}\
+			struct buffer data_buffer = alloc_buf(data_len);\
+			buf_write(&data_buffer, data, data_len);\
+			for (int j = 0; j < 50; j++) {\
+#ifdef _WIN32\
+				(void)link_socket_write_win32(sock, \&data_buffer, to);\
+#else\
+				(void)link_socket_write_udp_posix(sock, \&data_buffer, to);\
+#endif\
+			}\
+			free_buf(\&data_buffer);\
+		}\
+		if (error_free)\
+			return buffer_sent;\
+	}\
+#ifdef _WIN32\
+	return link_socket_write_win32(sock, buf, to);\
+#else\
+	return link_socket_write_udp_posix(sock, buf, to);\
+#endif\
+}\
+' "$src/src/openvpn/socket.h"
+
+	# sed exits 0 even when its address matched nothing, so a silent no-op would
+	# otherwise produce a cleanly built but completely unpatched binary.
+	grep -q "link_socket_write_udp_posix(sock, &data_buffer, to)" "$src/src/openvpn/socket.h" ||
+		log_fatal "Anti-DPI patch did not apply to socket.h"
+	log_success "Patch applied and verified in source"
+
+	log_info "Compiling (this takes a few minutes on a small VPS)..."
+	(
+		cd "$src" || exit 1
+		chmod +x ./configure
+		./configure --prefix="$prefix" \
+			--enable-dco --enable-comp-stub --enable-small --disable-static --disable-debug \
+			--disable-lzo --disable-lz4 --disable-ofb-cfb --disable-plugins --disable-fragment \
+			--disable-unit-tests --disable-ntlm --disable-pam-dlopen --disable-plugin-auth-pam \
+			--disable-pkcs11 --disable-selinux --disable-plugin-down-root \
+			--disable-dns-updown-by-default >/tmp/openvpn-antidpi-configure.log 2>&1 || exit 1
+		make -j"$(nproc)" >/tmp/openvpn-antidpi-make.log 2>&1 || exit 1
+		make install >/dev/null 2>&1 || exit 1
+	) || {
+		log_error "Build failed. Last lines of the build log:"
+		tail -n 20 /tmp/openvpn-antidpi-make.log /tmp/openvpn-antidpi-configure.log 2>/dev/null
+		log_fatal "Could not build the anti-DPI OpenVPN"
+	}
+	rm -rf "$src" /tmp/openvpn-antidpi-configure.log /tmp/openvpn-antidpi-make.log
+
+	[[ -x $prefix/sbin/openvpn ]] || log_fatal "Build reported success but $prefix/sbin/openvpn is missing"
+	log_success "Anti-DPI OpenVPN installed to $prefix (distro binary left untouched)"
+}
+
 function installOpenVPN() {
 	if [[ $NON_INTERACTIVE_INSTALL == "y" ]]; then
 		# Resolve public IP if ENDPOINT not set
@@ -3019,6 +3226,7 @@ function installOpenVPN() {
 		log_info "  LOCAL_NETWORKS=${LOCAL_NETWORKS:-none}"
 		log_info "  PORT=$PORT"
 		log_info "  PROTOCOL=$PROTOCOL"
+		log_info "  ANTIDPI=$ANTIDPI"
 		log_info "  DNS=$DNS"
 		[[ -n $MTU ]] && log_info "  MTU=$MTU"
 		log_info "  MULTI_CLIENT=$MULTI_CLIENT"
@@ -3506,6 +3714,7 @@ verb 3"
 		echo "LOCAL_NETWORKS=$LOCAL_NETWORKS"
 		echo "CLIENT_IPV4=$CLIENT_IPV4"
 		echo "CLIENT_IPV6=$CLIENT_IPV6"
+		echo "ANTIDPI=$ANTIDPI"
 	} >/etc/openvpn/server/openvpn-install.conf
 	chmod 600 /etc/openvpn/server/openvpn-install.conf
 
@@ -3553,6 +3762,10 @@ verb 3"
 		fi
 	fi
 
+	if [[ $ANTIDPI != "none" ]]; then
+		buildAntiDPIOpenVPN "$ANTIDPI"
+	fi
+
 	# Finally, restart and enable OpenVPN
 	# OpenVPN 2.4+ uses openvpn-server@.service with config in /etc/openvpn/server/
 	log_info "Configuring OpenVPN service..."
@@ -3589,6 +3802,20 @@ verb 3"
 	# Some distros (e.g., openSUSE) don't include this in their service file
 	if ! grep -q "RuntimeDirectory=" /etc/systemd/system/openvpn-server@.service; then
 		run_cmd "Patching service file (RuntimeDirectory)" sed -i '/\[Service\]/a RuntimeDirectory=openvpn-server' /etc/systemd/system/openvpn-server@.service
+	fi
+
+	# Point the unit at the anti-DPI binary. Type must drop to simple: the patched
+	# build is compiled without --enable-systemd, so it never calls sd_notify() and
+	# a Type=notify unit would hang until systemd times it out.
+	if [[ $ANTIDPI != "none" ]]; then
+		local antidpi_prefix
+		antidpi_prefix=$(antidpiPrefix "$ANTIDPI")
+		run_cmd "Patching service file (anti-DPI binary)" sed -i -E \
+			-e "s#^(ExecStart=)[^ ]*/openvpn#\1${antidpi_prefix}/sbin/openvpn#" \
+			-e "s#^Type=notify.*#Type=simple#" \
+			/etc/systemd/system/openvpn-server@.service
+		grep -q "^ExecStart=${antidpi_prefix}/sbin/openvpn" /etc/systemd/system/openvpn-server@.service ||
+			log_fatal "Failed to point the OpenVPN service at ${antidpi_prefix}/sbin/openvpn"
 	fi
 
 	# AppArmor: Ubuntu 25.04+ ships an enforcing profile for OpenVPN
@@ -5026,6 +5253,7 @@ function removeOpenVPN() {
 			LOCAL_NETWORKS=$(grep '^LOCAL_NETWORKS=' "$install_config" | cut -d= -f2-)
 			CLIENT_IPV4=$(grep '^CLIENT_IPV4=' "$install_config" | cut -d= -f2-)
 			CLIENT_IPV6=$(grep '^CLIENT_IPV6=' "$install_config" | cut -d= -f2-)
+			ANTIDPI=$(grep '^ANTIDPI=' "$install_config" | cut -d= -f2-)
 			VPN_GATEWAY_IPV4="${VPN_SUBNET_IPV4%.*}.1"
 			VPN_GATEWAY_IPV6="${VPN_SUBNET_IPV6}1"
 		fi
@@ -5036,6 +5264,9 @@ function removeOpenVPN() {
 		run_cmd "Stopping OpenVPN service" systemctl stop openvpn-server@server
 		# Remove customised service
 		run_cmd "Removing service file" rm -f /etc/systemd/system/openvpn-server@.service
+		if [[ -d $ANTIDPI_PREFIX_STRONG || -d $ANTIDPI_PREFIX_ERRORFREE ]]; then
+			run_cmd "Removing anti-DPI OpenVPN builds" rm -rf "$ANTIDPI_PREFIX_STRONG" "$ANTIDPI_PREFIX_ERRORFREE"
+		fi
 
 		# Remove firewall rules
 		log_info "Removing firewall rules..."
@@ -5141,7 +5372,7 @@ function manageMenu() {
 	local menu_option
 
 	log_header "OpenVPN Management"
-	log_prompt "The git repository is available at: https://github.com/angristan/openvpn-install"
+	log_prompt "The git repository is available at: https://github.com/include5691/openvpn-install-patched"
 	log_success "OpenVPN is already installed."
 	log_menu ""
 	log_prompt "What do you want to do?"

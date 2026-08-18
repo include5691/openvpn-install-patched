@@ -1,10 +1,17 @@
-# openvpn-install
+# openvpn-install-patched
 
 [![Say Thanks!](https://img.shields.io/badge/Say%20Thanks-!-1EAEDB.svg)](https://saythanks.io/to/angristan)
 
 OpenVPN installer for Debian, Ubuntu, Fedora, openSUSE, CentOS, Amazon Linux, Arch Linux, Oracle Linux, Rocky Linux and AlmaLinux.
 
 This script will let you setup and manage your own secure VPN server in just a few seconds.
+
+> [!NOTE]
+> This is a fork of [angristan/openvpn-install](https://github.com/angristan/openvpn-install) that adds
+> **[anti-DPI handshake obfuscation](#anti-dpi-handshake-obfuscation)** for networks that fingerprint and block
+> the OpenVPN protocol itself, such as Russia and Iran. Everything else is unchanged and tracks upstream.
+> The obfuscation is **server-side only** — your existing `.ovpn` files and stock OpenVPN clients keep working
+> with no modification.
 
 ## What is this?
 
@@ -68,6 +75,7 @@ That said, OpenVPN still makes sense when you need:
 - Choice to protect clients with a password (private key encryption)
 - Option to allow multiple devices to use the same client profile simultaneously (disables persistent IP addresses)
 - **Peer fingerprint authentication** (OpenVPN 2.6+): Simplified WireGuard-like authentication without a CA
+- **Anti-DPI handshake obfuscation** for networks that block the OpenVPN protocol (see [below](#anti-dpi-handshake-obfuscation))
 - Many other little things!
 
 ## Compatibility
@@ -105,7 +113,7 @@ To be noted:
 First, download the script on your server and make it executable:
 
 ```bash
-curl -O https://raw.githubusercontent.com/angristan/openvpn-install/master/openvpn-install.sh
+curl -O https://raw.githubusercontent.com/include5691/openvpn-install-patched/master/openvpn-install.sh
 chmod +x openvpn-install.sh
 ```
 
@@ -385,9 +393,75 @@ done < users.txt
 ./openvpn-install.sh server status --format json
 ```
 
+## Anti-DPI handshake obfuscation
+
+Some countries — Russia and Iran most notably — do not block VPN servers by IP or by port. They run deep packet inspection that recognises the **OpenVPN protocol itself** and kills the flow once it identifies it.
+
+### Do you actually have this problem?
+
+The signature is distinctive, and worth confirming before you compile anything:
+
+- The handshake **succeeds**. TLS negotiates, the client logs `Initialization Sequence Completed`.
+- A few seconds later the tunnel goes silent in both directions. No TLS errors, no RST, no ICMP.
+- The client hits `Inactivity timeout (--ping-restart)` and reconnects, and the cycle repeats forever.
+- Changing the port or switching UDP↔TCP changes **nothing** — the fingerprint travels with the protocol.
+- Plain traffic to the same server (SSH, HTTPS, ordinary UDP) is completely unaffected.
+
+If instead the handshake never starts at all, your server IP is blocked outright and this patch will not help you — you need a different IP.
+
+### Enabling it
+
+Interactive install offers it automatically when you choose UDP. For the CLI:
+
+```bash
+./openvpn-install.sh install --antidpi errorfree
+```
+
+| Mode | Masking | Client-visible effect |
+| --- | --- | --- |
+| `none` (default) | — | standard OpenVPN |
+| `strong` | best | clients log 150 harmless `unknown opcode` warnings per handshake |
+| `errorfree` | slightly weaker | no client-side warnings; better for phones and routers |
+
+Prefer `errorfree` unless you have a reason not to: the decoys it sends carry a valid opcode, so strict clients such as OpenVPN Connect discard them silently instead of logging an error for each one.
+
+### How it works
+
+The installer rebuilds OpenVPN from the source matching your installed version, patching `link_socket_write_udp()` so that whenever the server sends a handshake reset packet (opcodes 7, 8 and 10) it also emits 150 decoy datagrams. The classifier is looking for a specific pattern in the first packets of a flow; burying the handshake in noise breaks the match, so the connection is never labelled as OpenVPN and never gets killed.
+
+The patched binary is installed to `/opt/ovpn-patched` (or `/opt/ovpn-patched-ef`) and the systemd unit is pointed at it. Your distribution's `/usr/sbin/openvpn` is left untouched, so a package upgrade cannot silently revert the patch.
+
+Data channel packets are **not** modified, which is why throughput and latency are unaffected. The only cost is roughly 15–40 KB of decoy traffic per handshake.
+
+### Limitations
+
+- **UDP only.** The patch sits in the UDP send path; the installer refuses `--antidpi` with `--protocol tcp`.
+- **Server-side only.** Only packets the server sends are disguised. Client→server packets still look like OpenVPN. This is enough against current filtering, but a censor that classifies purely on the client→server direction would defeat it.
+- **Compilation is required**, which takes a few minutes and pulls in build dependencies. On hosts with under 1.5 GB RAM the installer adds a 2 GB swap file first, because `gcc` otherwise gets OOM-killed.
+- The patch targets a specific upstream function signature. If a future OpenVPN release changes it, the installer aborts with a clear error rather than building something unpatched.
+
+### Reverting
+
+Reinstall with `--antidpi none`, or point the unit back by hand:
+
+```bash
+sed -i -e 's|^ExecStart=/opt/ovpn-patched[^/]*/sbin/openvpn|ExecStart=/usr/sbin/openvpn|' \
+       -e 's|^Type=simple|Type=notify|' /etc/systemd/system/openvpn-server@.service
+systemctl daemon-reload && systemctl restart openvpn-server@server
+```
+
+Credit for the decoy technique goes to [AntiZapret-VPN](https://github.com/GubernievS/AntiZapret-VPN).
+
 ## Fork
 
-This script is based on the great work of [Nyr and its contributors](https://github.com/Nyr/openvpn-install).
+This fork of [angristan/openvpn-install](https://github.com/angristan/openvpn-install) adds the anti-DPI obfuscation described above. Upstream is tracked as the `upstream` remote:
+
+```bash
+git remote add upstream https://github.com/angristan/openvpn-install.git
+git fetch upstream && git merge upstream/master
+```
+
+Upstream itself is based on the great work of [Nyr and its contributors](https://github.com/Nyr/openvpn-install).
 
 Since 2016, the two scripts have diverged and are not alike anymore, especially under the hood. The main goal of the script was enhanced security. But since then, the script has been completely rewritten and a lot a features have been added. The script is only compatible with recent distributions though, so if you need to use a very old server or client, I advise using Nyr's script.
 
